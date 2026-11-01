@@ -5,6 +5,7 @@ venv/
 .venv/
 .env
 .pytest_cache/
+rentrakshak-backend/data/
 
 # Node
 node_modules/
