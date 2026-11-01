@@ -1,0 +1,62 @@
+# API & Web Framework
+
+fastapi
+
+uvicorn[standard]
+
+pydantic
+
+
+
+# Web Scraping
+
+playwright
+
+beautifulsoup4
+
+
+
+# Machine Learning & NLP
+
+scikit-learn
+
+transformers
+
+datasets
+
+onnxruntime
+
+
+
+# PyTorch (CPU Optimized for local Vivobook execution)
+
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+torch
+
+torchvision
+
+
+
+# Vision & Image Processing
+httpx
+
+Pillow
+
+imagehash
+
+
+
+# Databases & Vector Search
+
+duckdb
+
+qdrant-client
+
+
+
+# MLOps & Tracking
+
+mlflow
+
+dvc
