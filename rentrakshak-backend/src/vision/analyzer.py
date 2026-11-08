@@ -6,14 +6,46 @@ import time
 import duckdb
 import imagehash
 import httpx
+import math
 
 from PIL import Image, UnidentifiedImageError
-from typing import Dict, Any, Tuple, List
+from typing import Dict, Any, Optional, Tuple, List
 
 from src.core.interfaces import IRiskAnalyzer
 from src.core.logger import get_logger
 
 logger = get_logger(__name__)
+
+@staticmethod
+def _is_location_nearby(
+    lat1: Optional[float],
+    lon1: Optional[float],
+    lat2: Optional[float],
+    lon2: Optional[float],
+    threshold_meters: float = 500.0
+) -> bool:
+    """
+    Calculates the Haversine distance between two coordinates.
+    Returns True if the distance is within the threshold (e.g., same society/building).
+    Returns False if any coordinate is missing or distance exceeds threshold.
+    """
+    if lat1 is None or lon1 is None or lat2 is None or lon2 is None:
+        return False
+        
+    R = 6371000  # Radius of Earth in meters
+    phi_1 = math.radians(lat1)
+    phi_2 = math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+
+    a = math.sin(delta_phi / 2.0) ** 2 + \
+        math.cos(phi_1) * math.cos(phi_2) * \
+        math.sin(delta_lambda / 2.0) ** 2
+    
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    distance = R * c
+    
+    return distance <= threshold_meters
 
 
 class VisionAnomalyAnalyzer(IRiskAnalyzer):
@@ -115,7 +147,9 @@ class VisionAnomalyAnalyzer(IRiskAnalyzer):
                     CREATE TABLE IF NOT EXISTS image_hashes (
                         listing_url VARCHAR,
                         image_url VARCHAR,
-                        phash VARCHAR
+                        phash VARCHAR,
+                        latitude FLOAT,
+                        longitude FLOAT,
                     )
                 """)
 
@@ -153,15 +187,15 @@ class VisionAnomalyAnalyzer(IRiskAnalyzer):
     # Image downloading
     # ---------------------------------------------------------
 
-    async def _download_image(
+    async def _download_images(
         self,
         urls: List[str]
-    ) -> Tuple[Image.Image, str]:
+    ) -> List[Tuple[Image.Image, str]]:
         """
         Attempts to download an image from multiple URLs.
 
         Returns:
-            Tuple containing:
+            List of tuples containing:
             - Successfully decoded PIL image.
             - URL from which the image was downloaded.
         """
@@ -184,9 +218,11 @@ class VisionAnomalyAnalyzer(IRiskAnalyzer):
 
         successful_downloads = 0
 
+        downloaded_images : List[Tuple[Image.Image, str]] = []
+
         async with httpx.AsyncClient(
             follow_redirects=True,
-            timeout=httpx.Timeout(10.0)
+            timeout=httpx.Timeout(50.0)
         ) as client:
 
             for index, url in enumerate(urls, start=1):
@@ -202,15 +238,12 @@ class VisionAnomalyAnalyzer(IRiskAnalyzer):
                 )
 
                 try:
-
                     response = await client.get(
                         url,
                         headers=headers
                     )
 
-                    download_duration = (
-                        time.perf_counter() - url_start
-                    )
+                    download_duration = time.perf_counter() - url_start
 
                     logger.info(
                         "Image HTTP response received | "
@@ -248,6 +281,9 @@ class VisionAnomalyAnalyzer(IRiskAnalyzer):
                         io.BytesIO(response.content)
                     )
 
+                    # Force actual decoding.
+                    img.load()
+
                     logger.info(
                         "Image decoded successfully | "
                         "format=%s | dimensions=%s | "
@@ -258,19 +294,22 @@ class VisionAnomalyAnalyzer(IRiskAnalyzer):
                         time.perf_counter() - decode_start
                     )
 
-                    # Force actual decoding while response buffer is available.
-                    img.load()
-
                     successful_downloads += 1
 
+                    # Accumulate image and its corresponding URL.
+                    downloaded_images.append((img, url))
+
                     logger.info(
-                        "Image download process succeeded | "
-                        "successful_url=%s | total_duration=%.3fs",
+                        "Image download succeeded | "
+                        "successful_url=%s | successful_downloads=%d | "
+                        "total_duration=%.3fs",
                         url,
+                        successful_downloads,
                         time.perf_counter() - download_start
                     )
 
-                    return img, url
+                    continue
+
 
                 except httpx.HTTPStatusError:
 
@@ -302,29 +341,33 @@ class VisionAnomalyAnalyzer(IRiskAnalyzer):
                     )
 
                 logger.warning(
-                    "Image URL failed. Trying next fallback URL | "
+                    "Image URL failed. Continuing to next URL | "
                     "url_index=%d",
                     index
                 )
 
-        logger.error(
-            "All image URLs failed | total_urls=%d | duration=%.3fs",
-            len(urls),
-            time.perf_counter() - download_start
-        )
+            # Return all successfully downloaded images after loop completion.
+            logger.info(
+                "Image download batch completed | "
+                "total_urls=%d | successful_downloads=%d | "
+                "failed_downloads=%d | total_duration=%.3fs",
+                len(urls),
+                len(downloaded_images),
+                len(urls) - len(downloaded_images),
+                time.perf_counter() - download_start
+            )
 
-        raise ValueError(
-            "All provided image URLs failed to download or were invalid."
-        )
+            return downloaded_images
 
     # ---------------------------------------------------------
     # Main analysis pipeline
     # ---------------------------------------------------------
 
+   
     async def analyze(
-        self,
-        listing_data: Dict[str, Any]
-    ) -> Tuple[float, str]:
+    self,
+    listing_data: Dict[str, Any]
+) -> Tuple[float, str]:
 
         analysis_start = time.perf_counter()
 
@@ -366,6 +409,8 @@ class VisionAnomalyAnalyzer(IRiskAnalyzer):
                     "Listing URL missing from input data."
                 )
 
+                return 0.0, "Listing URL missing from input data."
+
             if not isinstance(image_urls, list):
 
                 logger.warning(
@@ -403,203 +448,228 @@ class VisionAnomalyAnalyzer(IRiskAnalyzer):
                 len(valid_urls)
             )
 
-            # Step 2: Download image.
+            # Step 2: Download all valid images.
             logger.info(
-                "Step 1/4: Downloading listing image."
+                "Step 1/4: Downloading listing images."
             )
 
-            img, successful_url = await self._download_image(
-                valid_urls
-            )
+            download_start = time.perf_counter()
+
+            downloaded_images = await self._download_images(valid_urls)
+
+            if not downloaded_images:
+
+                logger.warning(
+                    "No images could be downloaded | "
+                    "listing_url=%s | attempted_urls=%d | duration=%.3fs",
+                    current_listing_url,
+                    len(valid_urls),
+                    time.perf_counter() - download_start
+                )
+
+                return (
+                    0.0,
+                    "Vision analysis skipped: No valid images could be downloaded."
+                )
 
             logger.info(
-                "Image downloaded | listing_url=%s | image_url=%s",
+                "Images downloaded successfully | "
+                "listing_url=%s | downloaded_count=%d | "
+                "attempted_urls=%d | duration=%.3fs",
                 current_listing_url,
-                successful_url
+                len(downloaded_images),
+                len(valid_urls),
+                time.perf_counter() - download_start
             )
 
-            # Step 3: Generate perceptual hash.
+            # Step 3: Analyze each downloaded image.
             logger.info(
-                "Step 2/4: Generating perceptual hash."
+                "Step 2/4: Starting individual image analysis."
             )
 
-            hash_start = time.perf_counter()
+            duplicate_matches = []
 
-            img_hash = imagehash.phash(img)
+            successful_analyses = 0
+            failed_analyses = 0
 
-            img_hash_str = str(img_hash)
+            total_images = len(downloaded_images)
 
-            logger.info(
-                "Perceptual hash generated | "
-                "phash=%s | hash_duration=%.3fs",
-                img_hash_str,
-                time.perf_counter() - hash_start
-            )
-
-            # Step 4: Check existing hashes.
-            logger.info(
-                "Step 3/4: Checking existing image hashes in DuckDB."
-            )
-
-            db_start = time.perf_counter()
-
+            # Open one DuckDB connection for the entire batch.
             with duckdb.connect(self.db_path) as con:
 
-                query = """
-                    SELECT listing_url, image_url, phash
-                    FROM image_hashes
-                    WHERE listing_url IS DISTINCT FROM ?
-                """
+                existing_records = con.execute("""
+                SELECT listing_url, image_url, phash, latitude, longitude
+                FROM image_hashes
+                WHERE listing_url IS DISTINCT FROM ?
+                """, [current_listing_url]).fetchall()
 
-                existing_records = con.execute(
-                    query,
-                    [current_listing_url]
-                ).fetchall()
+                for index, image_data in enumerate(
+                    downloaded_images,
+                    start=1
+                ):
 
-                logger.info(
-                    "Existing image hashes retrieved | "
-                    "record_count=%d | query_duration=%.3fs",
-                    len(existing_records),
-                    time.perf_counter() - db_start
-                )
+                    # Validate downloaded image tuple.
+                    if (
+                        not isinstance(image_data, tuple)
+                        or len(image_data) != 2
+                    ):
 
-                # Step 5: Compare Hamming distances.
-                logger.info(
-                    "Step 4/4: Calculating Hamming distances | "
-                    "comparison_count=%d | threshold=%d",
-                    len(existing_records),
-                    self.similarity_threshold
-                )
+                        failed_analyses += 1
 
-                comparison_start = time.perf_counter()
-
-                closest_match = None
-                minimum_distance = None
-
-                for record_url, record_image_url, record_hash_str in existing_records:
-
-                    try:
-
-                        stored_hash = imagehash.hex_to_hash(
-                            record_hash_str
-                        )
-
-                        hamming_distance = img_hash - stored_hash
-
-                        logger.debug(
-                            "Image hash comparison | "
-                            "existing_listing=%s | "
-                            "existing_image=%s | "
-                            "stored_hash=%s | "
-                            "hamming_distance=%d",
-                            record_url,
-                            record_image_url,
-                            record_hash_str,
-                            hamming_distance
-                        )
-
-                        if (
-                            minimum_distance is None
-                            or hamming_distance < minimum_distance
-                        ):
-
-                            minimum_distance = hamming_distance
-
-                            closest_match = record_url
-
-                        if hamming_distance < self.similarity_threshold:
-
-                            logger.warning(
-                                "Potential duplicate image detected | "
-                                "current_listing=%s | "
-                                "matched_listing=%s | "
-                                "hamming_distance=%d | threshold=%d",
-                                current_listing_url,
-                                record_url,
-                                hamming_distance,
-                                self.similarity_threshold
-                            )
-
-                            score = 100.0
-
-                            proof = (
-                                "Photo reused in another listing: "
-                                f"{record_url}"
-                            )
-
-                            logger.info(
-                                "Vision analysis completed with duplicate detected | "
-                                "score=%.2f | duration=%.3fs",
-                                score,
-                                time.perf_counter() - analysis_start
-                            )
-
-                            return score, proof
-
-                    except Exception:
-
-                        logger.exception(
-                            "Failed to compare stored image hash | "
-                            "listing_url=%s | stored_hash=%s",
-                            record_url,
-                            record_hash_str
+                        logger.warning(
+                            "Invalid downloaded image entry | "
+                            "image_index=%d/%d | received_type=%s",
+                            index,
+                            total_images,
+                            type(image_data).__name__
                         )
 
                         continue
 
-                logger.info(
-                    "Image comparison completed | "
-                    "comparisons=%d | closest_match=%s | "
-                    "minimum_hamming_distance=%s | duration=%.3fs",
-                    len(existing_records),
-                    closest_match,
-                    minimum_distance,
-                    time.perf_counter() - comparison_start
-                )
+                    img, image_url = image_data
 
-                # Step 6: Store current image hash.
-                logger.info(
-                    "Storing image hash in DuckDB | "
-                    "listing_url=%s | image_url=%s",
-                    current_listing_url,
-                    successful_url
-                )
-
-                insert_start = time.perf_counter()
-
-                con.execute(
-                    """
-                    INSERT INTO image_hashes (
-                        listing_url,
-                        image_url,
-                        phash
+                    logger.info(
+                        "Processing downloaded image | "
+                        "image_index=%d/%d | image_url=%s",
+                        index,
+                        total_images,
+                        image_url
                     )
-                    VALUES (?, ?, ?)
-                    """,
-                    [
-                        current_listing_url,
-                        successful_url,
-                        img_hash_str
-                    ]
-                )
 
-                logger.info(
-                    "Image hash stored successfully | "
-                    "insert_duration=%.3fs",
-                    time.perf_counter() - insert_start
-                )
+                    try:
+
+                        # Analyze one image using the helper function.
+                        matched_listing = await self._analyze_single_image(
+                            img=img,
+                            image_url=image_url,
+                            current_listing_url=current_listing_url,
+                            latitude=listing_data.get("latitude"),
+                            longitude=listing_data.get("longitude"),
+                            existing_records=existing_records,
+                            con=con
+                        )
+
+                        successful_analyses += 1
+
+                        if matched_listing:
+
+                            duplicate_matches.append(
+                                (image_url, matched_listing)
+                            )
+
+                            logger.warning(
+                                "Duplicate image detected | "
+                                "image_index=%d/%d | "
+                                "image_url=%s | matched_listing=%s",
+                                index,
+                                total_images,
+                                image_url,
+                                matched_listing
+                            )
+
+                        else:
+
+                            logger.info(
+                                "No duplicate detected for image | "
+                                "image_index=%d/%d | image_url=%s",
+                                index,
+                                total_images,
+                                image_url
+                            )
+
+                    except Exception:
+
+                        failed_analyses += 1
+
+                        logger.exception(
+                            "Individual image analysis failed | "
+                            "image_index=%d/%d | image_url=%s",
+                            index,
+                            total_images,
+                            image_url
+                        )
+
+
+            # Step 4: Aggregate results from all images.
+            logger.info(
+                "Step 3/4: Aggregating image analysis results."
+            )
 
             logger.info(
-                "Vision analysis completed successfully | "
-                "listing_url=%s | score=0.0 | "
-                "duplicate_found=False | total_duration=%.3fs",
+                "Image analysis summary | "
+                "listing_url=%s | total_images=%d | "
+                "successful_analyses=%d | failed_analyses=%d | "
+                "duplicate_matches=%d",
                 current_listing_url,
+                total_images,
+                successful_analyses,
+                failed_analyses,
+                len(duplicate_matches)
+            )
+
+            # If at least one duplicate is detected,
+            # classify the listing as potentially fraudulent.
+            if duplicate_matches:
+
+                score = 100.0
+
+                duplicate_proofs = [
+                    (
+                        f"Photo reused in another listing: "
+                        f"{matched_listing} "
+                        f"(image: {image_url})"
+                    )
+                    for image_url, matched_listing in duplicate_matches
+                ]
+
+                proof = "; ".join(duplicate_proofs)
+
+                logger.warning(
+                    "Vision analysis completed with duplicate images detected | "
+                    "listing_url=%s | duplicate_count=%d | "
+                    "score=%.2f | duration=%.3fs",
+                    current_listing_url,
+                    len(duplicate_matches),
+                    score,
+                    time.perf_counter() - analysis_start
+                )
+
+                return score, proof
+
+            # If every individual analysis failed, report that
+            # the vision analysis could not produce a result.
+            if successful_analyses == 0:
+
+                logger.warning(
+                    "Vision analysis could not process any downloaded images | "
+                    "listing_url=%s | total_images=%d | "
+                    "failed_analyses=%d | duration=%.3fs",
+                    current_listing_url,
+                    total_images,
+                    failed_analyses,
+                    time.perf_counter() - analysis_start
+                )
+
+                return (
+                    0.0,
+                    "Vision analysis skipped: All downloaded images failed processing."
+                )
+
+            # No duplicates found among successfully analyzed images.
+            logger.info(
+                "Step 4/4: Vision analysis completed successfully | "
+                "listing_url=%s | score=0.0 | "
+                "duplicate_found=False | successful_analyses=%d | "
+                "failed_analyses=%d | total_duration=%.3fs",
+                current_listing_url,
+                successful_analyses,
+                failed_analyses,
                 time.perf_counter() - analysis_start
             )
 
             return (
                 0.0,
-                "Image appears authentic. No internal duplicates found."
+                "No duplicate images detected across the listing's downloaded images."
             )
 
         except ValueError as ve:
@@ -631,7 +701,199 @@ class VisionAnomalyAnalyzer(IRiskAnalyzer):
                 "Vision analysis skipped due to processing error."
             )
 
+    async def _analyze_single_image(
+    self,
+    img: Image.Image,
+    image_url: str,
+    current_listing_url: str,
+    latitude: Optional[float],
+    longitude: Optional[float],
+    # Updated tuple to include lat and lon from existing records
+    existing_records: List[Tuple[str, str, str, Optional[float], Optional[float]]],
+    con
+) -> Optional[str]:
+        """
+        Analyze a single downloaded image.
 
+        Returns:
+            Matched listing URL if a duplicate is detected.
+            None if no duplicate is detected.
+        """
+
+        image_start = time.perf_counter()
+
+        logger.info(
+            "Starting single image analysis | image_url=%s",
+            image_url
+        )
+
+        # Step 1: Generate perceptual hash.
+        logger.info("Generating perceptual hash")
+
+        hash_start = time.perf_counter()
+
+        img_hash = imagehash.phash(img)
+        img_hash_str = str(img_hash)
+
+        logger.info(
+            "Perceptual hash generated | "
+            "phash=%s | hash_duration=%.3fs",
+            img_hash_str,
+            time.perf_counter() - hash_start
+        )
+
+        # Step 2: Retrieve existing image hashes.
+        logger.info(
+            "Checking existing image hashes in DuckDB"
+        )
+
+        db_start = time.perf_counter()
+
+        # Step 3: Compare Hamming distances.
+        logger.info(
+            "Calculating Hamming distances | "
+            "comparison_count=%d | threshold=%d",
+            len(existing_records),
+            self.similarity_threshold
+        )
+
+        comparison_start = time.perf_counter()
+
+        closest_match = None
+        minimum_distance = None
+        duplicate_match = None
+
+        # Unpacking now includes record_lat and record_lon
+        for record_url, record_image_url, record_hash_str, record_lat, record_lon in existing_records:
+
+            try:
+                stored_hash = imagehash.hex_to_hash(
+                    record_hash_str
+                )
+
+                hamming_distance = img_hash - stored_hash
+
+                logger.debug(
+                    "Image hash comparison | "
+                    "existing_listing=%s | "
+                    "existing_image=%s | "
+                    "stored_hash=%s | "
+                    "hamming_distance=%d",
+                    record_url,
+                    record_image_url,
+                    record_hash_str,
+                    hamming_distance
+                )
+
+                if (
+                    minimum_distance is None
+                    or hamming_distance < minimum_distance
+                ):
+                    minimum_distance = hamming_distance
+                    closest_match = record_url
+
+                if hamming_distance < self.similarity_threshold:
+                    
+                    # --- NEW LOGIC: Geographical Proximity Check ---
+                    if _is_location_nearby(latitude, longitude, record_lat, record_lon):
+                        logger.info(
+                            "Similar image ignored | properties are located nearby (same society/building) | "
+                            "current_listing=%s | matched_listing=%s",
+                            current_listing_url,
+                            record_url
+                        )
+                        # Skip this record as a legitimate identical layout/society image
+                        continue
+
+                    duplicate_match = record_url
+
+                    logger.warning(
+                        "Potential duplicate image detected | "
+                        "current_listing=%s | "
+                        "current_image=%s | "
+                        "matched_listing=%s | "
+                        "matched_image=%s | "
+                        "hamming_distance=%d | threshold=%d",
+                        current_listing_url,
+                        image_url,
+                        record_url,
+                        record_image_url,
+                        hamming_distance,
+                        self.similarity_threshold
+                    )
+
+                    # One matching record is sufficient for this image.
+                    break
+
+            except Exception:
+                logger.exception(
+                    "Failed to compare stored image hash | "
+                    "listing_url=%s | stored_hash=%s",
+                    record_url,
+                    record_hash_str
+                )
+
+                continue
+
+        logger.info(
+            "Image comparison completed | "
+            "comparisons=%d | closest_match=%s | "
+            "minimum_hamming_distance=%s | duration=%.3fs",
+            len(existing_records),
+            closest_match,
+            minimum_distance,
+            time.perf_counter() - comparison_start
+        )
+
+        # Step 4: Store hash only if no duplicate was detected.
+        if duplicate_match is None:
+
+            logger.info(
+                "Storing image hash in DuckDB | "
+                "listing_url=%s | image_url=%s",
+                current_listing_url,
+                image_url
+            )
+
+            insert_start = time.perf_counter()
+
+            # Updated query to store latitude and longitude
+            con.execute(
+                """
+                INSERT INTO image_hashes (
+                    listing_url,
+                    image_url,
+                    phash,
+                    latitude,
+                    longitude
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [
+                    current_listing_url,
+                    image_url,
+                    img_hash_str,
+                    latitude,
+                    longitude
+                ]
+            )
+
+            logger.info(
+                "Image hash stored successfully | "
+                "insert_duration=%.3fs",
+                time.perf_counter() - insert_start
+            )
+
+        logger.info(
+            "Single image analysis completed | "
+            "image_url=%s | duplicate_found=%s | "
+            "duration=%.3fs",
+            image_url,
+            duplicate_match is not None,
+            time.perf_counter() - image_start
+        )
+
+        return duplicate_match
 # ---------------------------------------------------------
 # Quick Test Block
 # ---------------------------------------------------------

@@ -17,6 +17,8 @@ class ScrapedListing(BaseModel):
     title: str = ""
     locality: str = ""
 
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
     rent: Optional[float] = None
     maintenance_amount: Optional[float] = None
     area_sq_ft: Optional[float] = None

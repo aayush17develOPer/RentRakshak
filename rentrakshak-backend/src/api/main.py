@@ -15,10 +15,19 @@ from src.tabular.analyzer import PriceAnomalyAnalyzer
 from src.nlp.analyzer import TextScamAnalyzer
 from src.api.ensemble import EnsembleScorer
 from src.core.logger import get_logger
+from fastapi.middleware.cors import CORSMiddleware 
 
 logger = get_logger(__name__)
 
 app = FastAPI(title="RentRakshak API", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],  # Next.js development server
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # --- Schemas ---
 class ListingRequest(BaseModel): url: HttpUrl

@@ -170,6 +170,8 @@ class NoBrokerScraper(IListingScraper):
                     platform="nobroker",
                     title=details.get("propertyTitle") or details.get("title") or "",
                     locality=details.get("secondaryTitle") or details.get("completeStreetName") or details.get("street") or "",
+                    latitude=details.get("latitude"),
+                    longitude=details.get("longitude"),
                     rent=float(rent_val) if rent_val else None,
                     maintenance_amount=float(maint_val) if maint_val else None,
                     area_sq_ft=float(area_val) if area_val else None,
