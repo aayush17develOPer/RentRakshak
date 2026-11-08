@@ -27,44 +27,41 @@ class NoBrokerScraper(IListingScraper):
     """
 
 
-    async def _extract_images(self, page) -> List[str]:
-        """Extracts property images by explicitly targeting the images.nobroker.in CDN."""
+    def _extract_images(self, photos_data: List[Dict]) -> List[str]:
+        """
+        Constructs property image URLs directly from the extracted JSON photos array,
+        bypassing the need for DOM scraping or Regex.
+        """
         try:
-            image_urls = await page.evaluate("""
-                Array.from(document.querySelectorAll('img'))
-                     .map(img => img.src)
-                     .filter(src => {
-                         if (!src || !src.includes('http')) return false;
-                         
-                         const lowerSrc = src.toLowerCase();
-                         
-                         // 1. POSITIVE FILTER: Only accept images from the property CDN
-                         if (!lowerSrc.includes('images.nobroker.in')) {
-                             return false;
-                         }
-                         
-                         // 2. NEGATIVE FILTER: Exclude stray UI elements just in case
-                         if (lowerSrc.includes('logo') || 
-                             lowerSrc.includes('icon') || 
-                             lowerSrc.includes('avatar') || 
-                             lowerSrc.includes('.svg') ||
-                             lowerSrc.includes('placeholder')) {
-                             return false;
-                         }
-                         
-                         return true;
-                     })
-            """)
+            if not photos_data or not isinstance(photos_data, list):
+                return []
+
+            urls = []
+            for photo in photos_data:
+                images_map = photo.get('imagesMap') or {}
+                
+                # Grab the 'large' or 'original' resolution for optimal perceptual hashing
+                img_name = images_map.get('large') or images_map.get('original') or images_map.get('medium')
+                
+                if img_name and isinstance(img_name, str):
+                    # The property ID is the 32-character prefix before the first underscore
+                    prop_id = img_name.split('_')[0]
+                    
+                    if len(prop_id) == 32:
+                        full_url = f"https://images.nobroker.in/images/{prop_id}/{img_name}"
+                        urls.append(full_url)
+                        
+            # Deduplicate just in case, while preserving order
+            unique_urls = list(dict.fromkeys(urls))
             
-            # Deduplicate URLs (sometimes desktop and mobile views load the same image twice)
-            unique_urls = list(dict.fromkeys(image_urls))
-            logger.info(unique_urls)
+            logger.info(f"Constructed {len(unique_urls)} image URLs directly from JSON data.")
+            return unique_urls[:15]
             
-            # Return up to 5 actual property images for vision analysis
-            return unique_urls[:5] if unique_urls else []
         except Exception as e:
-            logger.warning(f"Image extraction failed: {e}")
-            return []# ---------------------------------------------------------
+            logger.warning(f"Failed to parse images from JSON data: {e}", exc_info=True)
+            return []    
+    
+    
     # Synchronous scraping implementation
     # ---------------------------------------------------------
 
@@ -162,7 +159,7 @@ class NoBrokerScraper(IListingScraper):
                 total_floors = details.get("totalFloor")
                 floor_val = f"{floor_number}/{total_floors}" if floor_number is not None and total_floors is not None else ""
 
-                image_urls = await self._extract_images(page)
+                image_urls = self._extract_images(details.get("photos", []))
 
                 # Instantiate the Pydantic model for strict validation
                 listing_obj = ScrapedListing(
