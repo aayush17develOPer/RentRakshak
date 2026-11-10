@@ -130,34 +130,34 @@ class NoBrokerScraper(IListingScraper):
                 maint_val = details.get("maintenanceAmount") if details.get("maintenance") else None
                 area_val = details.get("propertySize")
                 deposit_val = details.get("deposit")
-                bath_val = details.get("bathroom")
+                # bath_val = details.get("bathroom")
 
                 bedroom_config = details.get("typeDesc") or ""
-                building_type = details.get("buildingType")
-                prop_type = {"AP": "Apartment"}.get(building_type, building_type or "")
-                tenant_values = details.get("leaseTypeNew") or []
-                pref_tenant = {"ANYONE": "Anyone"}.get(tenant_values[0], tenant_values[0]) if tenant_values else ""
-                possession_val = {"READY": "Immediately"}.get(details.get("state"), details.get("formattedAvailableFrom") or "")
+                # building_type = details.get("buildingType")
+                # prop_type = {"AP": "Apartment"}.get(building_type, building_type or "") # May affect scam analysis, will consider later
+                # tenant_values = details.get("leaseTypeNew") or []
+                # pref_tenant = {"ANYONE": "Anyone"}.get(tenant_values[0], tenant_values[0]) if tenant_values else ""
+                # possession_val = {"READY": "Immediately"}.get(details.get("state"), details.get("formattedAvailableFrom") or "")
                 
-                current_situation = get_display_value("CURRENT_SITUATION")
+                # current_situation = get_display_value("CURRENT_SITUATION")
                 property_age = details.get("propertyAge")
-                building_age = "Newly Constructed" if current_situation == "New Property" or property_age == 0 else (current_situation or str(property_age or ""))
+                # building_age = "Newly Constructed" if current_situation == "New Property" or property_age == 0 else (current_situation or str(property_age or ""))
                 
                 balconies = details.get("balconies")
-                balcony_val = "NA" if balconies == 0 else str(balconies) if balconies is not None else ""
+                # balcony_val = "NA" if balconies == 0 else str(balconies) if balconies is not None else ""
 
-                posted_timestamp = details.get("reactivationReqDate") or details.get("activationDate") or details.get("creationDate")
-                posted_on_val = ""
-                if posted_timestamp:
-                    try:
-                        india_tz = timezone(timedelta(hours=5, minutes=30))
-                        posted_on_val = datetime.fromtimestamp(posted_timestamp / 1000, tz=india_tz).strftime("%b %d, %Y")
-                    except Exception:
-                        pass
+                # posted_timestamp = details.get("reactivationReqDate") or details.get("activationDate") or details.get("creationDate")
+                # posted_on_val = ""
+                # if posted_timestamp:
+                #     try:
+                #         india_tz = timezone(timedelta(hours=5, minutes=30))
+                #         posted_on_val = datetime.fromtimestamp(posted_timestamp / 1000, tz=india_tz).strftime("%b %d, %Y")
+                #     except Exception:
+                #         pass
 
                 floor_number = details.get("floor")
-                total_floors = details.get("totalFloor")
-                floor_val = f"{floor_number}/{total_floors}" if floor_number is not None and total_floors is not None else ""
+                # total_floors = details.get("totalFloor")
+                # floor_val = f"{floor_number}/{total_floors}" if floor_number is not None and total_floors is not None else ""
 
                 image_urls = self._extract_images(details.get("photos", []))
 
@@ -174,26 +174,23 @@ class NoBrokerScraper(IListingScraper):
                     area_sq_ft=float(area_val) if area_val else None,
                     deposit=float(deposit_val) if deposit_val else None,
                     bedroom_configuration=bedroom_config,
-                    property_type=prop_type,
-                    preferred_tenant=pref_tenant,
-                    possession=possession_val,
+                    # property_type=prop_type,
                     parking=details.get("parkingDesc") or "",
-                    building_age=building_age,
-                    balcony=balcony_val,
-                    posted_on=posted_on_val,
+                    property_age=property_age,
+                    balcony=balconies,
                     furnishing_status=details.get("furnishingDesc") or "",
                     facing=details.get("facingDesc") or "",
-                    water_supply=(details.get("waterSupply") or "").replace("_", " ").title(),
-                    floor=floor_val,
-                    bathroom=int(bath_val) if bath_val else None,
+                    # water_supply=(details.get("waterSupply") or "").replace("_", " ").title(),
+                    floor=floor_number,
+                    # bathroom=int(bath_val) if bath_val else None,
                     pet_allowed=get_display_value("PET"),
-                    non_veg_allowed=get_display_value("NON_VEG_ALLOWED"),
+                    # non_veg_allowed=get_display_value("NON_VEG_ALLOWED"),
                     gated_security=get_display_value("GATED_SECURITY"),
-                    description=details.get("description") or details.get("combineDescription") or details.get("ownerDes") or "",
+                    # description=details.get("description") or details.get("combineDescription") or details.get("ownerDes") or "",
                     image_urls=image_urls
                 )
 
-                logger.info("Successfully validated schema mapping.")
+                logger.info("Successfully validated schema mapping")
                 # We return the model_dump() (dictionary) so it satisfies the IListingScraper interface contract
                 return listing_obj.model_dump(mode='json')
 
@@ -218,8 +215,6 @@ class NoBrokerScraper(IListingScraper):
             loop.close()
 
     async def extract_listing(self, url: str) -> Dict[str, Any]:
-        return await asyncio.to_thread(self._scrape_isolated, url)
-        """Implements the IListingScraper interface."""
         return await asyncio.to_thread(self._scrape_isolated, url)
 
 # ---------------------------------------------------------

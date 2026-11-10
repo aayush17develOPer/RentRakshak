@@ -26,28 +26,22 @@ class ScrapedListing(BaseModel):
 
     # Property configuration
     bedroom_configuration: str = ""
-    property_type: str = ""
-    preferred_tenant: str = ""
-    possession: str = ""
+    # property_type: str = ""
     parking: str = ""
 
     # Building information
-    building_age: str = ""
-    balcony: str = ""
-    posted_on: str = ""
+    property_age: Optional[float] = None
+    balcony: Optional[float] = None
 
     # Property overview
     furnishing_status: str = ""
     facing: str = ""
-    water_supply: str = ""
-    floor: str = ""
-    bathroom: Optional[int] = None
+    # water_supply: str = ""
+    floor: Optional[float] = None
 
     # Additional property attributes
     pet_allowed: str = ""
-    non_veg_allowed: str = ""
     gated_security: str = ""
 
     # Description and images
-    description: str = ""
     image_urls: List[HttpUrl] = Field(default_factory=list)
